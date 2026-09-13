@@ -8,6 +8,32 @@ import base64
 
 st.set_page_config(page_title="現場パトロール＆清掃管理システム", layout="wide", initial_sidebar_state="collapsed")
 
+# --- パスワード認証ブロック ---
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == "TF77":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # パスワードを保持しないように削除
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.subheader("🔒 ログイン認証")
+        st.text_input("パスワードを入力してください", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.subheader("🔒 ログイン認証")
+        st.text_input("パスワードを入力してください", type="password", on_change=password_entered, key="password")
+        st.error("😕 パスワードが違います")
+        return False
+    else:
+        return True
+
+# 認証チェック（パスワードが通るまでここでストップ）
+if not check_password():
+    st.stop()
+
+# --- 以降、認証済みのユーザーだけに表示されるメイン画面 ---
 st.title("🗺️ 現場パトロール ＆ 清掃報告ポータル")
 
 # スプレッドシートの読み込み（物件マスター）
@@ -208,7 +234,6 @@ elif menu == "現地巡回・清掃報告フォーム":
 elif menu == "現地タスク（進捗管理）":
     df_tasks = load_tasks()
     
-    # ─── 【個別詳細・作業ページ】（タスクが選択されている場合） ───
     if st.session_state.selected_task_id is not None:
         selected_id = st.session_state.selected_task_id
         matched_rows = df_tasks[df_tasks['タスクID'].astype(str) == str(selected_id)]
@@ -300,7 +325,6 @@ elif menu == "現地タスク（進捗管理）":
                 else:
                     st.info("📷 このタスクに添付された写真はありません。")
 
-    # ─── 【タスク一覧ページ】（通常時） ───
     else:
         st.subheader("📊 現地タスク（進捗管理）")
         st.write("未対応・確認待ちのタスク一覧です。「詳細を確認」から写真の確認やステータス変更が行えます。")
