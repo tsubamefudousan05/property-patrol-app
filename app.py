@@ -80,7 +80,7 @@ GAS_URL = "https://script.google.com/macros/s/AKfycbzjNTNT98YPFL1oo3Lz7BU-d0FJqm
 # --- ラジオボタンによる画面切り替え ---
 menu = st.radio(
     "表示モード", 
-    ["物件一覧・検索", "現地巡回・清掃報告フォーム", "現地タスク（進捗管理）", "🗺️ マップ（全件一括ピン）"], 
+    ["物件一覧・検索", "現地巡回・報告フォーム", "現地タスク（進捗管理）", "🗺️ マップ（全件一括ピン）"], 
     horizontal=True,
     label_visibility="collapsed"
 )
@@ -126,8 +126,8 @@ if menu == "物件一覧・検索":
         st.divider()
 
 # ==================== 2. 報告フォーム ====================
-elif menu == "現地巡回・清掃報告フォーム":
-    st.subheader("📋 現地巡回・清掃報告フォーム")
+elif menu == "現地巡回・報告フォーム":
+    st.subheader("📋 現地巡回・報告フォーム")
     
     if not st.session_state.confirm_mode:
         st.write("現場での作業内容を入力し、写真を選択して内容を確認します。")
