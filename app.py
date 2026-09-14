@@ -382,49 +382,60 @@ elif menu == "🗺️ マップ（全件一括ピン）":
     if df_tasks.empty:
         st.info("現在表示するアクティブなタスクはありません。")
     else:
-        # 物件マスターを「物件名: 住所」の辞書（早見表）に変換しておく
-        master_dict = dict(zip(df['物件名'].astype(str).str.strip(), df['物件住所'].astype(str).str.strip()))
+        # 物件マスターから「物件名: {住所, 緯度, 経度}」の辞書を作成
+        master_dict = {}
+        for idx, row in df.iterrows():
+            p_name = str(row.get('物件名', '')).strip()
+            p_addr = str(row.get('物件住所', '')).strip()
+            p_lat = row.get('緯度') if '緯度' in df.columns else None
+            p_lon = row.get('経度') if '経度' in df.columns else None
+            master_dict[p_name] = {"address": p_addr, "lat": p_lat, "lon": p_lon}
         
         # 岡山市中心部をデフォルト座標に設定
         m = folium.Map(location=[34.6617, 133.935], zoom_start=13)
         
         pinned_count = 0
-        with st.spinner("📍 物件の住所から地図上の位置を計算しています..."):
-            for idx, row in df_tasks.iterrows():
-                prop_name = str(row.get('物件名', '')).strip()
-                task_type = str(row.get('種別', ''))
-                staff = str(row.get('社員', ''))
-                date_val = str(row.get('発生日', ''))
-                
-                # 早見表から物件名に一致する住所を直接引く
-                address = master_dict.get(prop_name, "")
-                
-                if address and address != "nan" and address != "":
-                    # アプリ側で住所から緯度経度を自動取得
-                    lat, lon = get_lat_lon(address)
-                    if lat and lon:
-                        pinned_count += 1
-                        icon_color = "red" if "即時対応不可" in task_type else "blue"
-                        
-                        popup_html = f"""
-                        <div style="width:200px;">
-                            <b>{prop_name}</b><br>
-                            <b>種別:</b> {task_type}<br>
-                            <b>担当:</b> {staff}<br>
-                            <b>発生日:</b> {date_val}<br>
-                            <hr style="margin:5px 0;">
-                            📍 {address}
-                        </div>
-                        """
-                        folium.Marker(
-                            [lat, lon],
-                            popup=folium.Popup(popup_html, max_width=300),
-                            tooltip=prop_name,
-                            icon=folium.Icon(color=icon_color, icon="info-sign")
-                        ).add_to(m)
+        for idx, row in df_tasks.iterrows():
+            prop_name = str(row.get('物件名', '')).strip()
+            task_type = str(row.get('種別', ''))
+            staff = str(row.get('社員', ''))
+            date_val = str(row.get('発生日', ''))
+            
+            info = master_dict.get(prop_name, {})
+            address = info.get("address", "")
+            lat = info.get("lat")
+            lon = info.get("lon")
+            
+            # スプレッドシート側のF・G列に緯度経度が存在する場合
+            if pd.notna(lat) and pd.notna(lon) and str(lat).strip() != "" and str(lon).strip() != "":
+                try:
+                    lat_f = float(lat)
+                    lon_f = float(lon)
+                    pinned_count += 1
+                    
+                    icon_color = "red" if "即時対応不可" in task_type else "blue"
+                    
+                    popup_html = f"""
+                    <div style="width:200px;">
+                        <b>{prop_name}</b><br>
+                        <b>種別:</b> {task_type}<br>
+                        <b>担当:</b> {staff}<br>
+                        <b>発生日:</b> {date_val}<br>
+                        <hr style="margin:5px 0;">
+                        📍 {address}
+                    </div>
+                    """
+                    folium.Marker(
+                        [lat_f, lon_f],
+                        popup=folium.Popup(popup_html, max_width=300),
+                        tooltip=prop_name,
+                        icon=folium.Icon(color=icon_color, icon="info-sign")
+                    ).add_to(m)
+                except ValueError:
+                    pass
 
         if pinned_count == 0:
-            st.warning("タスクの物件名と、物件マスターの物件名が一致する住所が見つかりませんでした。表記（スペース等）をご確認ください。")
+            st.warning("スプレッドシートの緯度・経度データが見つかりませんでした。GASの残りの処理を実行するか、データをご確認ください。")
         else:
             st.success(f"📍 {pinned_count}件のタスク物件をマップにピン留めしました。")
             st_folium(m, width=700, height=500)
