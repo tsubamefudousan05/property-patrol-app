@@ -382,23 +382,25 @@ elif menu == "🗺️ マップ（全件一括ピン）":
     if df_tasks.empty:
         st.info("現在表示するアクティブなタスクはありません。")
     else:
-        # タスクデータと物件マスター（物件住所）を結合
-        merged_map_df = pd.merge(df_tasks, df[['物件名', '物件住所']], on='物件名', how='inner')
+        # 物件マスターを「物件名: 住所」の辞書（早見表）に変換しておく
+        master_dict = dict(zip(df['物件名'].astype(str).str.strip(), df['物件住所'].astype(str).str.strip()))
         
         # 岡山市中心部をデフォルト座標に設定
         m = folium.Map(location=[34.6617, 133.935], zoom_start=13)
         
         pinned_count = 0
         with st.spinner("📍 物件の住所から地図上の位置を計算しています..."):
-            for idx, row in merged_map_df.iterrows():
-                prop_name = str(row.get('物件名', ''))
-                address = str(row.get('物件住所', ''))
+            for idx, row in df_tasks.iterrows():
+                prop_name = str(row.get('物件名', '')).strip()
                 task_type = str(row.get('種別', ''))
                 staff = str(row.get('社員', ''))
                 date_val = str(row.get('発生日', ''))
                 
-                if address and address != "nan":
-                    # アプリ側で住所から緯度経度を自動取得（キャッシュされるので2回目以降は一瞬）
+                # 早見表から物件名に一致する住所を直接引く
+                address = master_dict.get(prop_name, "")
+                
+                if address and address != "nan" and address != "":
+                    # アプリ側で住所から緯度経度を自動取得
                     lat, lon = get_lat_lon(address)
                     if lat and lon:
                         pinned_count += 1
@@ -422,7 +424,7 @@ elif menu == "🗺️ マップ（全件一括ピン）":
                         ).add_to(m)
 
         if pinned_count == 0:
-            st.warning("有効な住所データが見つかりませんでした。")
+            st.warning("タスクの物件名と、物件マスターの物件名が一致する住所が見つかりませんでした。表記（スペース等）をご確認ください。")
         else:
             st.success(f"📍 {pinned_count}件のタスク物件をマップにピン留めしました。")
             st_folium(m, width=700, height=500)
