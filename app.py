@@ -7,6 +7,8 @@ import uuid
 import base64
 import folium
 from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 
 st.set_page_config(page_title="現場パトロール＆清掃管理システム", layout="wide", initial_sidebar_state="collapsed")
 
@@ -15,7 +17,7 @@ def check_password():
     def password_entered():
         if st.session_state["password"] == "TF77":
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # パスワードを保持しないように削除
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -31,11 +33,9 @@ def check_password():
     else:
         return True
 
-# 認証チェック（パスワードが通るまでここでストップ）
 if not check_password():
     st.stop()
 
-# --- 以降、認証済みのユーザーだけに表示されるメイン画面 ---
 st.title("🗺️ 現場パトロール ＆ 清掃報告ポータル")
 
 # スプレッドシートの読み込み（物件マスター）
@@ -78,6 +78,21 @@ if "selected_task_id" not in st.session_state:
     st.session_state.selected_task_id = None
 
 GAS_URL = "https://script.google.com/macros/s/AKfycbzjNTNT98YPFL1oo3Lz7BU-d0FJqmR25tSXgs7KDGeL4b7lZIgyzrOvUKxBhmNX7BU/exec"
+
+# 住所から緯度経度を取得する関数（アプリ側で自動変換・キャッシュ付き）
+@st.cache_data(show_spinner=False)
+def get_lat_lon(address):
+    if not address or pd.isna(address):
+        return None, None
+    geolocator = Nominatim(user_agent="tsubame_patrol_app_v2")
+    try:
+        # 岡山市などの検索精度を高めるため「日本, 」を付与
+        location = geolocator.geocode("日本, " + str(address), timeout=5)
+        if location:
+            return location.latitude, location.longitude
+    except (GeocoderTimedOut, Exception):
+        pass
+    return None, None
 
 # --- ラジオボタンによる画面切り替え ---
 menu = st.radio(
@@ -367,52 +382,47 @@ elif menu == "🗺️ マップ（全件一括ピン）":
     if df_tasks.empty:
         st.info("現在表示するアクティブなタスクはありません。")
     else:
-        # タスクデータと物件マスター（緯度・経度列を含む）を結合
-        merged_map_df = pd.merge(df_tasks, df, on='物件名', how='inner')
+        # タスクデータと物件マスター（物件住所）を結合
+        merged_map_df = pd.merge(df_tasks, df[['物件名', '物件住所']], on='物件名', how='inner')
         
         # 岡山市中心部をデフォルト座標に設定
         m = folium.Map(location=[34.6617, 133.935], zoom_start=13)
         
         pinned_count = 0
-        for idx, row in merged_map_df.iterrows():
-            prop_name = str(row.get('物件名', ''))
-            lat = row.get('緯度')
-            lon = row.get('経度')
-            task_type = str(row.get('種別', ''))
-            staff = str(row.get('社員', ''))
-            date_val = str(row.get('発生日', ''))
-            address = str(row.get('物件住所', ''))
-            
-            # 緯度・経度が有効な数値として存在する場合のみピンを立てる
-            if pd.notna(lat) and pd.notna(lon):
-                try:
-                    lat_f = float(lat)
-                    lon_f = float(lon)
-                    pinned_count += 1
-                    
-                    icon_color = "red" if "即時対応不可" in task_type else "blue"
-                    
-                    popup_html = f"""
-                    <div style="width:200px;">
-                        <b>{prop_name}</b><br>
-                        <b>種別:</b> {task_type}<br>
-                        <b>担当:</b> {staff}<br>
-                        <b>発生日:</b> {date_val}<br>
-                        <hr style="margin:5px 0;">
-                        📍 {address}
-                    </div>
-                    """
-                    folium.Marker(
-                        [lat_f, lon_f],
-                        popup=folium.Popup(popup_html, max_width=300),
-                        tooltip=prop_name,
-                        icon=folium.Icon(color=icon_color, icon="info-sign")
-                    ).add_to(m)
-                except ValueError:
-                    pass
+        with st.spinner("📍 物件の住所から地図上の位置を計算しています..."):
+            for idx, row in merged_map_df.iterrows():
+                prop_name = str(row.get('物件名', ''))
+                address = str(row.get('物件住所', ''))
+                task_type = str(row.get('種別', ''))
+                staff = str(row.get('社員', ''))
+                date_val = str(row.get('発生日', ''))
+                
+                if address and address != "nan":
+                    # アプリ側で住所から緯度経度を自動取得（キャッシュされるので2回目以降は一瞬）
+                    lat, lon = get_lat_lon(address)
+                    if lat and lon:
+                        pinned_count += 1
+                        icon_color = "red" if "即時対応不可" in task_type else "blue"
+                        
+                        popup_html = f"""
+                        <div style="width:200px;">
+                            <b>{prop_name}</b><br>
+                            <b>種別:</b> {task_type}<br>
+                            <b>担当:</b> {staff}<br>
+                            <b>発生日:</b> {date_val}<br>
+                            <hr style="margin:5px 0;">
+                            📍 {address}
+                        </div>
+                        """
+                        folium.Marker(
+                            [lat, lon],
+                            popup=folium.Popup(popup_html, max_width=300),
+                            tooltip=prop_name,
+                            icon=folium.Icon(color=icon_color, icon="info-sign")
+                        ).add_to(m)
 
         if pinned_count == 0:
-            st.warning("有効な緯度・経度データが見つかりませんでした。「物件マスター」に緯度・経度の列があり、データが入っているかご確認ください。")
+            st.warning("有効な住所データが見つかりませんでした。")
         else:
             st.success(f"📍 {pinned_count}件のタスク物件をマップにピン留めしました。")
             st_folium(m, width=700, height=500)
