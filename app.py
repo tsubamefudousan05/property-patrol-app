@@ -7,8 +7,6 @@ import uuid
 import base64
 import folium
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
 
 st.set_page_config(page_title="現場パトロール＆清掃管理システム", layout="wide", initial_sidebar_state="collapsed")
 
@@ -78,21 +76,6 @@ if "selected_task_id" not in st.session_state:
     st.session_state.selected_task_id = None
 
 GAS_URL = "https://script.google.com/macros/s/AKfycbzjNTNT98YPFL1oo3Lz7BU-d0FJqmR25tSXgs7KDGeL4b7lZIgyzrOvUKxBhmNX7BU/exec"
-
-# 住所から緯度経度を取得する関数（アプリ側で自動変換・キャッシュ付き）
-@st.cache_data(show_spinner=False)
-def get_lat_lon(address):
-    if not address or pd.isna(address):
-        return None, None
-    geolocator = Nominatim(user_agent="tsubame_patrol_app_v2")
-    try:
-        # 岡山市などの検索精度を高めるため「日本, 」を付与
-        location = geolocator.geocode("日本, " + str(address), timeout=5)
-        if location:
-            return location.latitude, location.longitude
-    except (GeocoderTimedOut, Exception):
-        pass
-    return None, None
 
 # --- ラジオボタンによる画面切り替え ---
 menu = st.radio(
@@ -387,8 +370,8 @@ elif menu == "🗺️ マップ（全件一括ピン）":
         for idx, row in df.iterrows():
             p_name = str(row.get('物件名', '')).strip()
             p_addr = str(row.get('物件住所', '')).strip()
-            p_lat = row.get('緯度') if '緯度' in df.columns else None
-            p_lon = row.get('経度') if '経度' in df.columns else None
+            p_lat = row.get('緯度') if '緯度' in df.columns else (row.iloc[5] if len(row) > 5 else None)
+            p_lon = row.get('経度') if '経度' in df.columns else (row.iloc[6] if len(row) > 6 else None)
             master_dict[p_name] = {"address": p_addr, "lat": p_lat, "lon": p_lon}
         
         # 岡山市中心部をデフォルト座標に設定
@@ -406,7 +389,6 @@ elif menu == "🗺️ マップ（全件一括ピン）":
             lat = info.get("lat")
             lon = info.get("lon")
             
-            # スプレッドシート側のF・G列に緯度経度が存在する場合
             if pd.notna(lat) and pd.notna(lon) and str(lat).strip() != "" and str(lon).strip() != "":
                 try:
                     lat_f = float(lat)
@@ -435,7 +417,7 @@ elif menu == "🗺️ マップ（全件一括ピン）":
                     pass
 
         if pinned_count == 0:
-            st.warning("スプレッドシートの緯度・経度データが見つかりませんでした。GASの残りの処理を実行するか、データをご確認ください。")
+            st.warning("スプレッドシートの緯度・経度データが見つかりませんでした。")
         else:
             st.success(f"📍 {pinned_count}件のタスク物件をマップにピン留めしました。")
             st_folium(m, width=700, height=500)
