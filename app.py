@@ -1,423 +1,578 @@
-import streamlit as st
+from datetime import datetime, date, timedelta
+import json
 import pandas as pd
-import urllib.parse
 import requests
-import datetime
-import uuid
-import base64
-import folium
-from streamlit_folium import st_folium
+import streamlit as st
 
-st.set_page_config(page_title="現場パトロール＆清掃管理システム", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="管理替え・進行管理ポータル", layout="wide")
 
-# --- パスワード認証ブロック ---
+# ==========================================
+# 🔐 簡易ログイン認証
+# ==========================================
 def check_password():
-    def password_entered():
-        if st.session_state["password"] == "TF77":
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+    """パスワード認証を行う関数"""
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
 
-    if "password_correct" not in st.session_state:
-        st.subheader("🔒 ログイン認証")
-        st.text_input("パスワードを入力してください", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.subheader("🔒 ログイン認証")
-        st.text_input("パスワードを入力してください", type="password", on_change=password_entered, key="password")
-        st.error("😕 パスワードが違います")
-        return False
-    else:
+    if st.session_state.authenticated:
         return True
+
+    _, col_center, _ = st.columns([1, 2, 1])
+    with col_center:
+        st.markdown("### 🔒 ログイン認証")
+        password = st.text_input("パスワードを入力してください", type="password")
+        
+        if st.button("ログイン", use_container_width=True):
+            if password == "PM77":
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("パスワードが間違っています。")
+    return False
 
 if not check_password():
     st.stop()
 
-st.title("🗺️ 現場パトロール ＆ 清掃報告ポータル")
+# ==========================================
+# 🏠 メインアプリケーション
+# ==========================================
+GAS_URL = "https://script.google.com/macros/s/AKfycbzADsde-SbZ_tmc4_p2lM7HjRLiuCqyDfD6v_deho-siZKQOhky8UC_OldMtLTxJ2PG/exec"
 
-# スプレッドシートの読み込み（物件マスター）
-@st.cache_data(ttl=30)
-def load_master():
-    sheet_url = "https://docs.google.com/spreadsheets/d/1dIwbOzfRBzee8GW6so40G5M_BD2V8Y-0cjkeVtZnPI8/export?format=csv&gid=163272435"
-    df = pd.read_csv(sheet_url)
-    df = df.dropna(subset=['物件名'])
-    return df
 
-# 現地タスクデータの読み込み
-@st.cache_data(ttl=0)
-def load_tasks():
-    task_url = "https://docs.google.com/spreadsheets/d/1dIwbOzfRBzee8GW6so40G5M_BD2V8Y-0cjkeVtZnPI8/export?format=csv&gid=1373175074"
-    try:
-        df_task = pd.read_csv(task_url)
-        return df_task
-    except Exception as e:
-        return pd.DataFrame()
+@st.cache_data(ttl=300)
+def fetch_data(sheet_name="引き継ぎ書"):
+  try:
+    url = f"{GAS_URL}?sheet={sheet_name}"
+    res = requests.get(url)
+    return res.json()
+  except Exception as e:
+    st.error(f"データ取得エラー ({sheet_name}): {e}")
+    return {"schema": [], "headers": [], "data": []}
 
-try:
-    df = load_master()
-except Exception as e:
-    st.error(f"読み込みエラー: {e}")
-    st.stop()
 
-staff_col = '物件担当者' if '物件担当者' in df.columns else df.columns[4]
-staff_list = sorted([str(s) for s in df[staff_col].unique() if pd.notna(s) and str(s).strip() != '-'])
-vendor_list = sorted([str(v) for v in df['清掃業者'].unique() if pd.notna(v) and str(v).strip() != '-'])
-property_list = sorted(df['物件名'].dropna().astype(str).unique().tolist())
+st.title("🏠 管理替え・進行管理ポータル")
 
-# セッションステート初期化
-if "confirm_mode" not in st.session_state:
-    st.session_state.confirm_mode = False
-if "form_data" not in st.session_state:
-    st.session_state.form_data = {}
-if "is_submitting" not in st.session_state:
-    st.session_state.is_submitting = False
-if "selected_task_id" not in st.session_state:
-    st.session_state.selected_task_id = None
-
-GAS_URL = "https://script.google.com/macros/s/AKfycbzjNTNT98YPFL1oo3Lz7BU-d0FJqmR25tSXgs7KDGeL4b7lZIgyzrOvUKxBhmNX7BU/exec"
-
-# --- ラジオボタンによる画面切り替え ---
-menu = st.radio(
-    "表示モード", 
-    ["物件一覧・検索", "現地巡回・報告フォーム", "現地タスク（進捗管理）", "🗺️ マップ（全件一括ピン）"], 
+mode = st.radio(
+    "操作モード",
+    ["📋 引き継ぎ書・管理", "🏁 管理終了案件", "🔄 オーナーチェンジ案件", "➕ 新規物件追加", "⚙️ 部署別・進捗ステータスビュー"],
     horizontal=True,
-    label_visibility="collapsed"
 )
 
-st.divider()
 
-# ==================== 1. 物件一覧・検索 ====================
-if menu == "物件一覧・検索":
-    st.subheader("🔍 物件一覧・検索")
+def parse_fixed_date(val):
+  if val is None:
+    return None
+  if isinstance(val, (int, float)):
+    if val < 10000:
+      return None
+    try:
+      base_date = date(1899, 12, 30)
+      return base_date + timedelta(days=int(val))
+    except Exception:
+      pass
+
+  v_str = str(val).strip()
+  if v_str in ["-", "", "未選択", "nan", "None", "未定"]:
+    return None
+
+  if v_str.isdigit():
+    val_int = int(v_str)
+    if val_int < 10000:
+      return None
+    try:
+      base_date = date(1899, 12, 30)
+      return base_date + timedelta(days=val_int)
+    except Exception:
+      pass
+
+  try:
+    if "T" in v_str:
+      clean_iso = v_str.replace("Z", "")
+      dt = datetime.fromisoformat(clean_iso)
+      dt = dt + timedelta(hours=9)
+      return dt.date()
+
+    v_str = v_str.replace("-", "/")
+    parts = v_str.split("/")
+    if len(parts) == 3:
+      return date(int(parts[0]), int(parts[1]), int(parts[2]))
+  except Exception:
+    pass
+  return None
+
+
+# 🌟 保存確認用のモーダルダイアログ
+@st.dialog("📋 変更内容の確認")
+def show_confirm_dialog(property_name, selected_row_id, edited_payload, target_row, sheet_name="引き継ぎ書"):
+    st.markdown(f"## 🏠 {property_name}")
+    st.markdown(f"**対象行番号**: {selected_row_id}")
+    st.markdown("---")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        sel_vendor = st.selectbox("清掃業者", ["すべて"] + vendor_list)
-    with col2:
-        sel_staff = st.selectbox("物件担当者", ["すべて"] + staff_list)
+    validated_payload = {}
+    for k, v in edited_payload.items():
+        if v is None or str(v).strip() == "":
+            validated_payload[k] = "済"
+        else:
+            validated_payload[k] = v
+
+    st.markdown("以下の内容で変更を保存します。内容を確認してください。")
+
+    diff_items = []
+    for k, new_v in validated_payload.items():
+        old_v = str(target_row.get(k, "")).strip()
+        if old_v in ["", "-", "未選択", "None", "nan"]:
+            old_v = "未"
+        if new_v != old_v:
+            diff_items.append({"title": k, "old": old_v, "new": new_v})
+
+    if diff_items:
+        st.markdown("### 🔍 変更される項目")
+        for item in diff_items:
+            cols = st.columns([2, 3, 3])
+            with cols[0]:
+                st.markdown(f"**{item['title']}**")
+            with cols[1]:
+                st.markdown(f"変更前: <span style='color: #ff9800;'>{item['old']}</span>", unsafe_allow_html=True)
+            with cols[2]:
+                st.markdown(f"変更後: <span style='color: #4caf50;'>**{item['new']}**</span>", unsafe_allow_html=True)
+            st.markdown("")
+    else:
+        st.info("変更された項目はありません。")
+
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("❌ キャンセル", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button("🚀 この内容で保存する", type="primary", use_container_width=True):
+            payload = {
+                "action": "update",
+                "sheet": sheet_name,
+                "rowId": selected_row_id,
+                "payload": validated_payload,
+            }
+            try:
+              res = requests.post(GAS_URL, json=payload)
+              if res.status_code == 200:
+                st.success("正常に更新されました！")
+                st.cache_data.clear()
+                st.rerun()
+              else:
+                st.error("更新に失敗しました。")
+            except Exception as e:
+              st.error(f"通信エラー: {e}")
+
+
+# ==========================================
+# 📋 モード1：引き継ぎ書・管理
+# ==========================================
+if mode == "📋 引き継ぎ書・管理":
+  response_data = fetch_data("引き継ぎ書")
+  schema = response_data.get("schema", [])
+  data = response_data.get("data", [])
+
+  if data:
+    filtered_data = []
+    for row in data:
+      filtered_data.append(row)
+
+    col_selectors, col_table = st.columns([4, 6])
+
+    with col_selectors:
+      st.markdown("### 🔍 検索・フィルター選択")
+      
+      def get_sort_key(row):
+        date_val = parse_fixed_date(row.get("集金開始月", ""))
+        if date_val:
+          return (0, date_val)
+        return (1, date.max)
+
+      sorted_filtered_data = sorted(filtered_data, key=get_sort_key)
+      
+      property_options = ["未選択（物件を選んでください）"]
+      property_map = {}
+      for row in sorted_filtered_data:
+        p_name = str(row.get("物件名称", row.get("物件名", "（物件名未設定）"))).strip()
+        raw_date = row.get("集金開始月", "")
+        parsed_d = parse_fixed_date(raw_date)
+        date_str = parsed_d.strftime("%Y/%m/%d") if parsed_d else (str(raw_date) if raw_date else "日付未設定")
         
-    kw = st.text_input("物件名・住所で絞り込み", "")
+        label = f"{p_name} （集金開始月: {date_str}）"
+        property_options.append(label)
+        property_map[label] = row
 
-    f_df = df.copy()
-    if sel_vendor != "すべて":
-        f_df = f_df[f_df['清掃業者'].astype(str) == sel_vendor]
-    if sel_staff != "すべて":
-        f_df = f_df[f_df[staff_col].astype(str) == sel_staff]
-    if kw:
-        f_df = f_df[
-            f_df['物件名'].astype(str).str.contains(kw, na=False) | 
-            f_df['物件住所'].astype(str).str.contains(kw, na=False)
-        ]
+      selected_prop_label = st.selectbox(
+          "🏠 物件を選択（日付順）",
+          property_options,
+          key="direct_property_select_hiki"
+      )
 
-    st.markdown(f"**該当物件数: {len(f_df)} 件**")
-    st.divider()
+      available_depts = sorted(list(set(s.get("department", "") for s in schema if s.get("department") and s.get("department") != "総合")))
+      dep_options = ["すべて（総合）"] + available_depts
 
-    for idx, row in f_df.head(30).iterrows():
-        st.markdown(f"### {row.get('物件名', '')}")
-        st.caption(f"管理コード: {row.get('棟管理コード', '')}")
-        st.text(f"📍 住所: {row.get('物件住所', '')}")
-        st.text(f"🧹 業者: {row.get('清掃業者', '-')}")
-        st.markdown(f"👤 **担当:** {row.get(staff_col, '-')}")
-        
-        addr = row.get('物件住所', '')
-        map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(str(addr))}"
-        st.markdown(f"[🗺️ Googleマップで開く]({map_url})", unsafe_allow_html=True)
-        st.divider()
+      filter_dep = st.selectbox(
+          "📂 部署を選択",
+          dep_options,
+          key="filter_dep_select_hiki"
+      )
 
-# ==================== 2. 報告フォーム ====================
-elif menu == "現地巡回・報告フォーム":
-    st.subheader("📋 現地巡回・報告フォーム")
-    
-    if not st.session_state.confirm_mode:
-        st.write("現場での作業内容を入力し、写真を選択して内容を確認します。")
-        
-        with st.form("report_input_form"):
-            rep_staff = st.selectbox("作業担当者名 *", ["選択してください"] + staff_list)
-            rep_prop = st.selectbox("物件名 *", ["選択してください"] + property_list)
-            
-            st.markdown("---")
-            uploaded_file = st.file_uploader("写真 (現場の写真をアップロード・撮影)", type=["jpg", "jpeg", "png"])
-            work_desc = st.text_input("作業内容", placeholder="例: エントランス床面・クモの巣除去")
-            
-            st.markdown("---")
-            is_urgent = st.checkbox("⚠️ 即時対応不可・要判断（管理者の的確な指示を仰ぐ）")
-            memo = st.text_area("備考・連絡事項", height=80)
-            
-            to_confirm = st.form_submit_button("🔍 入力内容を確認する", type="primary", use_container_width=True)
-            
-            if to_confirm:
-                if rep_staff == "選択してください" or rep_prop == "選択してください":
-                    st.error("⚠️ 「作業担当者名」と「物件名」を選択してください。")
+    if filter_dep != "すべて（総合）":
+      target_schema = [s for s in schema if s.get("department") == filter_dep or s.get("department") == "総合"]
+    else:
+      target_schema = schema
+
+    with col_table:
+      st.markdown(f"### 📊 対象データ一覧（全 {len(filtered_data)} 件）")
+
+      display_data = []
+      for row in filtered_data:
+        new_row = row.copy()
+        for k, v in new_row.items():
+          if k in ["管理契約開始日", "集金開始月"] and v:
+            fixed_date = parse_fixed_date(v)
+            if fixed_date:
+              new_row[k] = fixed_date.strftime("%Y/%m/%d")
+          if k != "_rowId" and (v is None or str(v).strip() in ["", "-", "未選択", "None", "nan"]):
+            new_row[k] = "未"
+        display_data.append(new_row)
+
+      df_display = pd.DataFrame(display_data)
+
+      valid_titles = [s["title"] for s in target_schema]
+      columns_to_show = ["_rowId"] + [t for t in df_display.columns if t != "_rowId"]
+      
+      seen = set()
+      unique_columns_to_show = []
+      for c in columns_to_show:
+        if c not in seen and c in df_display.columns:
+          seen.add(c)
+          unique_columns_to_show.append(c)
+
+      df_display_filtered = df_display[unique_columns_to_show]
+
+      st.dataframe(
+          df_display_filtered,
+          use_container_width=True,
+          height=250,
+          hide_index=True,
+      )
+
+    st.markdown("---")
+
+    if selected_prop_label == "未選択（物件を選んでください）":
+      st.info("👆 左上のセレクトボックスから物件を選択すると、ここに詳細な編集フォーム（4列表示）が展開されます。")
+    else:
+      target_row = property_map[selected_prop_label]
+      selected_row_id = target_row["_rowId"]
+      property_name = str(target_row.get("物件名称", target_row.get("物件名", "（物件名未設定）"))).strip()
+      if not property_name:
+        property_name = "（物件名未設定）"
+
+      head_col1, head_col3 = st.columns([4, 1])
+
+      with head_col1:
+        st.subheader(f"✏️ 選択中：{property_name} （行番号 {selected_row_id}）")
+
+      with head_col3:
+        top_save_clicked = st.button(
+            "💾 変更を保存", type="primary", use_container_width=True, key="save_hiki"
+        )
+
+      form_version_key = f"row_{selected_row_id}_dep_{filter_dep}"
+
+      with st.container(height=600):
+        edited_payload = {}
+
+        grouped_items = {}
+        for s in target_schema:
+          g = s["group"]
+          if g not in grouped_items:
+            grouped_items[g] = []
+          grouped_items[g].append(s)
+
+        for group_name, items in grouped_items.items():
+          st.markdown(f"### 📌 【 {group_name} 】")
+          form_cols = st.columns(4)
+
+          for i, s in enumerate(items):
+            title = s["title"]
+            raw_val = target_row.get(title, "")
+            options = s["options"]
+            unique_key = f"{form_version_key}_{group_name}_{i}_{title}"
+
+            target_col = form_cols[i % 4]
+            with target_col:
+              label_col, status_col = st.columns([2, 1])
+              with label_col:
+                is_mi_form = str(raw_val).strip() in ["", "-", "未選択", "None", "nan", "未"]
+                if is_mi_form:
+                  st.markdown(f"<span style='color: #ffeb3b; font-size: 0.9em;'>**{title}**</span>", unsafe_allow_html=True)
                 else:
-                    img_data_str = ""
-                    img_name = ""
-                    img_type = ""
-                    if uploaded_file is not None:
-                        img_bytes = uploaded_file.getvalue()
-                        img_data_str = base64.b64encode(img_bytes).decode('utf-8')
-                        img_name = uploaded_file.name
-                        img_type = uploaded_file.type
+                  st.markdown(f"<span style='font-size: 0.9em;'>**{title}**</span>", unsafe_allow_html=True)
 
-                    st.session_state.form_data = {
-                        "staff": rep_staff,
-                        "property": rep_prop,
-                        "work_desc": work_desc,
-                        "is_urgent": is_urgent,
-                        "memo": memo,
-                        "image_data": img_data_str,
-                        "image_name": img_name,
-                        "image_type": img_type
-                    }
-                    st.session_state.confirm_mode = True
-                    st.rerun()
+              with status_col:
+                current_status = "済" if str(raw_val).strip() not in ["", "-", "未選択", "None", "nan", "未"] else "未"
+                status_choice = st.radio(
+                    f"状態_{unique_key}",
+                    ["未", "済"],
+                    index=0 if current_status == "未" else 1,
+                    horizontal=True,
+                    key=f"status_{unique_key}",
+                    label_visibility="collapsed"
+                )
 
-    else:
-        st.markdown("### 👀 送信内容の確認")
-        st.info("以下の内容でスプレッドシートに送信します。よろしければ「確定して送信」を押してください。")
-        
-        data = st.session_state.form_data
-        
-        st.markdown(f"- **作業担当者名:** {data.get('staff')}")
-        st.markdown(f"- **物件名:** {data.get('property')}")
-        st.markdown(f"- **写真ファイル:** {data.get('image_name') if data.get('image_name') else '（なし）'}")
-        st.markdown(f"- **作業内容:** {data.get('work_desc') if data.get('work_desc') else '（なし）'}")
-        st.markdown(f"- **即時対応不可・要判断:** {'⚠️ あり' if data.get('is_urgent') else 'なし（通常報告）'}")
-        st.markdown(f"- **備考・連絡事項:** {data.get('memo') if data.get('memo') else '（なし）'}")
-        
-        st.markdown("---")
-        
-        col_back, col_submit = st.columns(2)
-        with col_back:
-            if st.button("✏️ 修正する", use_container_width=True, disabled=st.session_state.is_submitting):
-                st.session_state.confirm_mode = False
-                st.rerun()
-                
-        with col_submit:
-            if st.button("✅ 確定して送信する", type="primary", use_container_width=True, disabled=st.session_state.is_submitting):
-                st.session_state.is_submitting = True
-                st.rerun()
-
-        if st.session_state.is_submitting:
-            task_id = str(uuid.uuid4())[:8]
-            completed_date = datetime.date.today().strftime("%Y/%m/%d")
-            task_type = "即時対応不可・要判断" if data.get('is_urgent') else "現地巡回・清掃報告"
-            
-            with st.spinner("📤 写真とデータを送信中..."):
-                try:
-                    payload = {
-                        "task_id": task_id,
-                        "property_name": data.get('property'),
-                        "task_type": task_type,
-                        "completed_date": completed_date,
-                        "staff_name": data.get('staff'),
-                        "image_data": data.get('image_data'),
-                        "image_name": data.get('image_name'),
-                        "image_type": data.get('image_type'),
-                        "memo": data.get('work_desc') + (" / " + data.get('memo') if data.get('memo') else "")
-                    }
-                    response = requests.post(GAS_URL, json=payload, timeout=25)
-                    st.success(f"🎉 【{data.get('property')}】のデータを現地タスクに起票しました！（ID: {task_id}）")
-                    st.balloons()
-                except Exception as e:
-                    st.success(f"🎉 送信リクエストを完了しました！")
-            
-            st.session_state.is_submitting = False
-            st.session_state.confirm_mode = False
-            st.session_state.form_data = {}
-            
-            st.markdown("---")
-            if st.button("🔄 次の報告を入力する", type="primary", use_container_width=True):
-                st.rerun()
-
-# ==================== 3. 現地タスク（進捗管理） ====================
-elif menu == "現地タスク（進捗管理）":
-    df_tasks = load_tasks()
-    
-    if st.session_state.selected_task_id is not None:
-        selected_id = st.session_state.selected_task_id
-        matched_rows = df_tasks[df_tasks['タスクID'].astype(str) == str(selected_id)]
-        
-        if matched_rows.empty:
-            st.warning("このタスクはすでに対応完了として処理され、アーカイブ（ログへ移動）された可能性があります。")
-            if st.button("← 一覧に戻る"):
-                st.session_state.selected_task_id = None
-                st.rerun()
-        else:
-            row = matched_rows.iloc[0]
-            
-            if st.button("← タスク一覧に戻る", type="secondary"):
-                st.session_state.selected_task_id = None
-                st.rerun()
-                
-            st.markdown(f"### 🔍 タスク詳細: {row.get('物件名', '')}")
-            st.caption(f"タスクID: {selected_id}")
-            st.divider()
-            
-            col_detail, col_img = st.columns([1, 1])
-            
-            with col_detail:
-                st.markdown(f"**📌 種別:** {row.get('種別', '-')}")
-                st.markdown(f"**📅 発生日:** {row.get('発生日', '-')}")
-                st.markdown(f"**👤 担当社員:** {row.get('社員', '-')}")
-                st.markdown(f"**📝 備考・内容:** {row.get('備考', '-')}")
-                
-                raw_status = str(row.get('確認ステータス', '確認待ち'))
-                if raw_status == "nan" or not raw_status.strip():
-                    raw_status = "確認待ち"
-                st.markdown(f"**📌 現在のステータス:** {raw_status}")
-                
-                current_memo = str(row.get('管理者メモ', ''))
-                if current_memo == "nan":
-                    current_memo = ""
-
-                st.markdown("---")
-                st.markdown("#### 🛠️ 管理者アクション")
-                
-                admin_name = st.text_input("確認者（管理者名）", value="管理者", key=f"admin_name_{selected_id}")
-                
-                status_options = ["確認待ち", "確認中", "対応中", "対応完了"]
-                base_status = raw_status.split(" ")[0] if " " in raw_status else raw_status
-                default_idx = status_options.index(base_status) if base_status in status_options else 0
-                
-                new_status_select = st.selectbox("ステータス変更", status_options, index=default_idx, key=f"status_{selected_id}")
-                new_memo = st.text_area("管理者メモ・指示事項入力", value=current_memo, key=f"detail_memo_{selected_id}")
-                
-                if st.button("💾 変更を保存する", type="primary", use_container_width=True):
-                    now_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
-                    formatted_status = f"{new_status_select} ({now_str} - {admin_name})"
-                    
-                    with st.spinner("💾 スプレッドシートを更新・アーカイブ中..."):
-                        try:
-                            update_payload = {
-                                "action": "update_status",
-                                "task_id": selected_id,
-                                "status": formatted_status,
-                                "memo": new_memo
-                            }
-                            res = requests.post(GAS_URL, json=update_payload, timeout=15)
-                            
-                            if new_status_select == "対応完了":
-                                st.success(f"🎉 タスクを「対応完了」にし、対応完了ログへ自動アーカイブしました！")
-                            else:
-                                st.success(f"タスクのステータスを「{formatted_status}」に更新しました！")
-                            
-                            st.session_state.selected_task_id = None
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"保存エラーが発生しました: {e}")
-            
-            with col_img:
-                st.markdown("#### 📷 現場の写真確認")
-                photo_val = str(row.get('写真', ''))
-                
-                if photo_val and photo_val != "nan" and photo_val != "（写真なし）":
-                    if photo_val.startswith("http"):
-                        st.image(photo_val, caption="現場撮影写真", use_column_width=True)
-                        st.markdown(f"[🔗 原寸大のリンクを開く]({photo_val})", unsafe_allow_html=True)
-                    else:
-                        file_name_only = photo_val.split('/')[-1]
-                        drive_search_url = f"https://drive.google.com/drive/search?q={urllib.parse.quote(file_name_only)}"
-                        
-                        st.info(f"保存パス: `{photo_val}`")
-                        st.markdown(f"[🔍 Googleドライブでこのファイルを検索する]({drive_search_url})", unsafe_allow_html=True)
+              if title in ["管理契約開始日", "集金開始月"]:
+                if status_choice == "未":
+                  edited_payload[title] = "未"
                 else:
-                    st.info("📷 このタスクに添付された写真はありません。")
+                  parsed_d = parse_fixed_date(raw_val)
+                  d_default = parsed_d if parsed_d else date.today()
+                  chosen_date = st.date_input(
+                      f"{title} (日付)",
+                      value=d_default,
+                      key=f"date_{unique_key}",
+                      label_visibility="collapsed",
+                  )
+                  edited_payload[title] = chosen_date.strftime("%Y/%m/%d")
 
+              elif len(options) > 0:
+                if status_choice == "未":
+                  edited_payload[title] = "未"
+                else:
+                  current_val = str(raw_val).strip()
+                  if current_val in ["-", "", "未選択", "未"]:
+                    current_val = options[0]
+
+                  try:
+                    default_idx = options.index(current_val)
+                  except ValueError:
+                    default_idx = 0
+
+                  chosen_radio = st.radio(
+                      f"{title} (選択)",
+                      options,
+                      index=default_idx,
+                      key=f"rad_{unique_key}",
+                      horizontal=True,
+                      label_visibility="collapsed",
+                  )
+                  edited_payload[title] = chosen_radio
+
+              else:
+                if status_choice == "未":
+                  edited_payload[title] = "未"
+                else:
+                  typed_val = st.text_input(
+                      f"{title} (自由記述)",
+                      value=str(raw_val).strip() if raw_val and str(raw_val) != "未" else "",
+                      placeholder="入力",
+                      key=f"txt_{unique_key}",
+                      label_visibility="collapsed",
+                  )
+                  edited_payload[title] = typed_val.strip()
+
+          st.markdown("---")
+
+        if top_save_clicked:
+          show_confirm_dialog(property_name, selected_row_id, edited_payload, target_row, "引き継ぎ書")
+  else:
+    st.info("データがありません。")
+
+
+# ==========================================
+# 🏁 モード2：管理終了案件
+# ==========================================
+elif mode == "🏁 管理終了案件":
+  response_data = fetch_data("管理終了")
+  schema = response_data.get("schema", [])
+  data = response_data.get("data", [])
+
+  st.subheader("🏁 管理終了案件 管理モード")
+  if data:
+    def get_kanryo_sort_key(row):
+      d = parse_fixed_date(row.get("終了日", "")) or parse_fixed_date(row.get("終了予定日", ""))
+      if d:
+        return (0, d)
+      return (1, date.max)
+
+    sorted_data = sorted(data, key=get_kanryo_sort_key)
+    prop_options = ["未選択（物件を選んでください）"]
+    prop_map = {}
+
+    for row in sorted_data:
+      # 🌟 「物件名」と「物件名称」の両方に対応
+      p_name = str(row.get("物件名", row.get("物件名称", "（物件名未設定）"))).strip()
+      end_d = parse_fixed_date(row.get("終了日", ""))
+      if not end_d:
+        end_d = parse_fixed_date(row.get("終了予定日", ""))
+      
+      date_str = end_d.strftime("%Y/%m/%d") if end_d else "未定"
+      label = f"{p_name} （終了日: {date_str}）"
+      prop_options.append(label)
+      prop_map[label] = row
+
+    col_s1, col_s2 = st.columns([4, 6])
+    with col_s1:
+      selected_label = st.selectbox("🏠 管理終了物件を選択", prop_options, key="select_kanryo")
+
+    if selected_label != "未選択（物件を選んでください）":
+      target_row = prop_map[selected_label]
+      row_id = target_row["_rowId"]
+      p_name = str(target_row.get("物件名", target_row.get("物件名称", ""))).strip()
+
+      with col_s2:
+        st.markdown(f"**選択中**: {p_name} (行番号: {row_id})")
+        save_btn = st.button("💾 管理終了データを保存", type="primary", key="save_kanryo")
+
+      with st.container(height=500):
+        edited_payload = {}
+        grouped = {}
+        for s in schema:
+          g = s.get("group", "基本情報")
+          if g not in grouped:
+            grouped[g] = []
+          grouped[g].append(s)
+
+        if not schema:
+          items = [{"title": k, "options": [], "group": "基本情報"} for k in target_row.keys() if k != "_rowId"]
+          grouped = {"基本情報": items}
+
+        for g_name, items in grouped.items():
+          st.markdown(f"### 📌 【 {g_name} 】")
+          f_cols = st.columns(4)
+          for i, s in enumerate(items):
+            title = s["title"]
+            raw_val = target_row.get(title, "")
+            opts = s.get("options", [])
+            u_key = f"kanryo_{row_id}_{i}_{title}"
+
+            with f_cols[i % 4]:
+              st.markdown(f"<span style='font-size: 0.9em;'>**{title}**</span>", unsafe_allow_html=True)
+              if len(opts) > 0:
+                cur = str(raw_val).strip()
+                idx = opts.index(cur) if cur in opts else 0
+                val = st.selectbox(title, opts, index=idx, key=f"sel_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = val
+              elif "日" in title or "月" in title:
+                parsed = parse_fixed_date(raw_val)
+                d_val = parsed if parsed else date.today()
+                chosen_d = st.date_input(title, value=d_val, key=f"date_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = chosen_d.strftime("%Y/%m/%d")
+              else:
+                txt = st.text_input(title, value=str(raw_val) if raw_val and str(raw_val)!="nan" else "", key=f"txt_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = txt.strip()
+          st.markdown("---")
+
+        if save_btn:
+          show_confirm_dialog(p_name, row_id, edited_payload, target_row, "管理終了")
     else:
-        st.subheader("📊 現地タスク（進捗管理）")
-        st.write("未対応・確認待ちのタスク一覧です。「詳細を確認」から写真の確認やステータス変更が行えます。")
-        
-        if df_tasks.empty:
-            st.info("現在、表示できるタスクはありません。")
-        else:
-            for idx, row in df_tasks.iterrows():
-                task_id = str(row.get('タスクID', ''))
-                prop_name = str(row.get('物件名', ''))
-                task_type = str(row.get('種別', ''))
-                date_val = str(row.get('発生日', ''))
-                staff = str(row.get('社員', ''))
-                status = str(row.get('確認ステータス', '確認待ち'))
-                if status == "nan" or not status.strip():
-                    status = "確認待ち"
-                
-                badge = "⚠️ 【要対応】" if "即時対応不可" in task_type else "📌"
-                
-                with st.container():
-                    col_info, col_btn = st.columns([4, 1])
-                    with col_info:
-                        st.markdown(f"{badge} **{prop_name}** （発生日: {date_val} / 担当: {staff}）")
-                        st.caption(f"└ ステータス: **{status}** ｜ ID: `{task_id}`")
-                    with col_btn:
-                        st.write("") 
-                        if st.button("🔍 詳細を確認", key=f"btn_detail_{task_id}", use_container_width=True):
-                            st.session_state.selected_task_id = task_id
-                            st.rerun()
-                    st.divider()
+      st.info("👆 上のセレクトボックスから管理終了物件を選択してください。")
+  else:
+    st.info("「管理終了」シートにデータがありません。")
 
-# ==================== 4. マップ（全件一括ピン表示） ====================
-elif menu == "🗺️ マップ（全件一括ピン）":
-    st.subheader("🗺️ 現地タスク 全件一括マップ")
-    st.write("現在アクティブな現地タスクの全物件を、地図上にピンで一括表示します。")
 
-    df_tasks = load_tasks()
-    
-    if df_tasks.empty:
-        st.info("現在表示するアクティブなタスクはありません。")
+# ==========================================
+# 🔄 モード3：オーナーチェンジ案件
+# ==========================================
+elif mode == "🔄 オーナーチェンジ案件":
+  response_data = fetch_data("オーナーチェンジ")
+  schema = response_data.get("schema", [])
+  data = response_data.get("data", [])
+
+  st.subheader("🔄 オーナーチェンジ案件 管理モード")
+  if data:
+    def get_oc_sort_key(row):
+      d = parse_fixed_date(row.get("決済日", ""))
+      if d:
+        return (0, d)
+      return (1, date.max)
+
+    sorted_data = sorted(data, key=get_oc_sort_key)
+    prop_options = ["未選択（物件を選んでください）"]
+    prop_map = {}
+
+    for row in sorted_data:
+      # 🌟 「物件名」と「物件名称」の両方に対応
+      p_name = str(row.get("物件名", row.get("物件名称", "（物件名未設定）"))).strip()
+      pay_d = parse_fixed_date(row.get("決済日", ""))
+      date_str = pay_d.strftime("%Y/%m/%d") if pay_d else "未定"
+      
+      label = f"{p_name} （決済日: {date_str}）"
+      prop_options.append(label)
+      prop_map[label] = row
+
+    col_s1, col_s2 = st.columns([4, 6])
+    with col_s1:
+      selected_label = st.selectbox("🏠 オーナーチェンジ物件を選択", prop_options, key="select_oc")
+
+    if selected_label != "未選択（物件を選んでください）":
+      target_row = prop_map[selected_label]
+      row_id = target_row["_rowId"]
+      p_name = str(target_row.get("物件名", target_row.get("物件名称", ""))).strip()
+
+      with col_s2:
+        st.markdown(f"**選択中**: {p_name} (行番号: {row_id})")
+        save_btn = st.button("💾 オーナーチェンジデータを保存", type="primary", key="save_oc")
+
+      with st.container(height=500):
+        edited_payload = {}
+        grouped = {}
+        for s in schema:
+          g = s.get("group", "基本情報")
+          if g not in grouped:
+            grouped[g] = []
+          grouped[g].append(s)
+
+        if not schema:
+          items = [{"title": k, "options": [], "group": "基本情報"} for k in target_row.keys() if k != "_rowId"]
+          grouped = {"基本情報": items}
+
+        for g_name, items in grouped.items():
+          st.markdown(f"### 📌 【 {g_name} 】")
+          f_cols = st.columns(4)
+          for i, s in enumerate(items):
+            title = s["title"]
+            raw_val = target_row.get(title, "")
+            opts = s.get("options", [])
+            u_key = f"oc_{row_id}_{i}_{title}"
+
+            with f_cols[i % 4]:
+              st.markdown(f"<span style='font-size: 0.9em;'>**{title}**</span>", unsafe_allow_html=True)
+              if len(opts) > 0:
+                cur = str(raw_val).strip()
+                idx = opts.index(cur) if cur in opts else 0
+                val = st.selectbox(title, opts, index=idx, key=f"sel_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = val
+              elif "日" in title or "月" in title:
+                parsed = parse_fixed_date(raw_val)
+                d_val = parsed if parsed else date.today()
+                chosen_d = st.date_input(title, value=d_val, key=f"date_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = chosen_d.strftime("%Y/%m/%d")
+              else:
+                txt = st.text_input(title, value=str(raw_val) if raw_val and str(raw_val)!="nan" else "", key=f"txt_{u_key}", label_visibility="collapsed")
+                edited_payload[title] = txt.strip()
+          st.markdown("---")
+
+        if save_btn:
+          show_confirm_dialog(p_name, row_id, edited_payload, target_row, "オーナーチェンジ")
     else:
-        # 物件マスターから「物件名: {住所, 緯度, 経度}」の辞書を作成
-        master_dict = {}
-        for idx, row in df.iterrows():
-            p_name = str(row.get('物件名', '')).strip()
-            p_addr = str(row.get('物件住所', '')).strip()
-            p_lat = row.get('緯度') if '緯度' in df.columns else (row.iloc[5] if len(row) > 5 else None)
-            p_lon = row.get('経度') if '経度' in df.columns else (row.iloc[6] if len(row) > 6 else None)
-            master_dict[p_name] = {"address": p_addr, "lat": p_lat, "lon": p_lon}
-        
-        # 岡山市中心部をデフォルト座標に設定
-        m = folium.Map(location=[34.6617, 133.935], zoom_start=13)
-        
-        pinned_count = 0
-        for idx, row in df_tasks.iterrows():
-            prop_name = str(row.get('物件名', '')).strip()
-            task_type = str(row.get('種別', ''))
-            staff = str(row.get('社員', ''))
-            date_val = str(row.get('発生日', ''))
-            
-            info = master_dict.get(prop_name, {})
-            address = info.get("address", "")
-            lat = info.get("lat")
-            lon = info.get("lon")
-            
-            if pd.notna(lat) and pd.notna(lon) and str(lat).strip() != "" and str(lon).strip() != "":
-                try:
-                    lat_f = float(lat)
-                    lon_f = float(lon)
-                    pinned_count += 1
-                    
-                    icon_color = "red" if "即時対応不可" in task_type else "blue"
-                    
-                    popup_html = f"""
-                    <div style="width:200px;">
-                        <b>{prop_name}</b><br>
-                        <b>種別:</b> {task_type}<br>
-                        <b>担当:</b> {staff}<br>
-                        <b>発生日:</b> {date_val}<br>
-                        <hr style="margin:5px 0;">
-                        📍 {address}
-                    </div>
-                    """
-                    folium.Marker(
-                        [lat_f, lon_f],
-                        popup=folium.Popup(popup_html, max_width=300),
-                        tooltip=prop_name,
-                        icon=folium.Icon(color=icon_color, icon="info-sign")
-                    ).add_to(m)
-                except ValueError:
-                    pass
+      st.info("👆 上のセレクトボックスからオーナーチェンジ物件を選択してください。")
+  else:
+    st.info("「オーナーチェンジ」シートにデータがありません。")
 
-        if pinned_count == 0:
-            st.warning("スプレッドシートの緯度・経度データが見つかりませんでした。")
-        else:
-            st.success(f"📍 {pinned_count}件のタスク物件をマップにピン留めしました。")
-            st_folium(m, width=700, height=500)
+
+# ==========================================
+# ➕ 新規物件追加
+# ==========================================
+elif mode == "➕ 新規物件追加":
+  st.subheader("➕ 新規物件の追加登録")
+  st.info("※現在「引き継ぎ書」への新規追加機能が有効です。")
+
+
+# ==========================================
+# ⚙️ 部署別・進捗ステータスビュー
+# ==========================================
+elif mode == "⚙️ 部署別・進捗ステータスビュー":
+  st.subheader("⚙️ 部署別・進捗ステータス確認モード")
+  st.info("※サイドの機能は一覧画面に統合されました。")
