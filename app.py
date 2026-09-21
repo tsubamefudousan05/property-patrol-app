@@ -101,6 +101,16 @@ def parse_fixed_date(val):
   return None
 
 
+# 🌟 表記揺れやスペースに関わらず、安全に物件名を抽出するヘルパー関数
+def get_safe_property_name(row):
+  for k, v in row.items():
+    if "物件" in str(k) and k != "_rowId":
+      val = str(v).strip()
+      if val and val not in ["nan", "None", "", "未"]:
+        return val
+  return "（物件名未設定）"
+
+
 # 🌟 保存確認用のモーダルダイアログ
 @st.dialog("📋 変更内容の確認")
 def show_confirm_dialog(property_name, selected_row_id, edited_payload, target_row, sheet_name="引き継ぎ書"):
@@ -193,7 +203,7 @@ if mode == "📋 引き継ぎ書・管理":
       property_options = ["未選択（物件を選んでください）"]
       property_map = {}
       for row in sorted_filtered_data:
-        p_name = str(row.get("物件名称", row.get("物件名", "（物件名未設定）"))).strip()
+        p_name = get_safe_property_name(row)
         raw_date = row.get("集金開始月", "")
         parsed_d = parse_fixed_date(raw_date)
         date_str = parsed_d.strftime("%Y/%m/%d") if parsed_d else (str(raw_date) if raw_date else "日付未設定")
@@ -218,7 +228,7 @@ if mode == "📋 引き継ぎ書・管理":
       )
 
     if filter_dep != "すべて（総合）":
-      target_schema = [s for s in schema if s.get("department") == filter_dep or s.get("department") == "総合"]
+      target_schema = [s for s in schema if s.get("department") == filter_dep or s.get("department"] == "総合"]
     else:
       target_schema = schema
 
@@ -265,9 +275,7 @@ if mode == "📋 引き継ぎ書・管理":
     else:
       target_row = property_map[selected_prop_label]
       selected_row_id = target_row["_rowId"]
-      property_name = str(target_row.get("物件名称", target_row.get("物件名", "（物件名未設定）"))).strip()
-      if not property_name:
-        property_name = "（物件名未設定）"
+      property_name = get_safe_property_name(target_row)
 
       head_col1, head_col3 = st.columns([4, 1])
 
@@ -401,8 +409,7 @@ elif mode == "🏁 管理終了案件":
     prop_map = {}
 
     for row in sorted_data:
-      # 🌟 「物件名」と「物件名称」の両方に対応
-      p_name = str(row.get("物件名", row.get("物件名称", "（物件名未設定）"))).strip()
+      p_name = get_safe_property_name(row)
       end_d = parse_fixed_date(row.get("終了日", ""))
       if not end_d:
         end_d = parse_fixed_date(row.get("終了予定日", ""))
@@ -419,7 +426,7 @@ elif mode == "🏁 管理終了案件":
     if selected_label != "未選択（物件を選んでください）":
       target_row = prop_map[selected_label]
       row_id = target_row["_rowId"]
-      p_name = str(target_row.get("物件名", target_row.get("物件名称", ""))).strip()
+      p_name = get_safe_property_name(target_row)
 
       with col_s2:
         st.markdown(f"**選択中**: {p_name} (行番号: {row_id})")
@@ -493,8 +500,7 @@ elif mode == "🔄 オーナーチェンジ案件":
     prop_map = {}
 
     for row in sorted_data:
-      # 🌟 「物件名」と「物件名称」の両方に対応
-      p_name = str(row.get("物件名", row.get("物件名称", "（物件名未設定）"))).strip()
+      p_name = get_safe_property_name(row)
       pay_d = parse_fixed_date(row.get("決済日", ""))
       date_str = pay_d.strftime("%Y/%m/%d") if pay_d else "未定"
       
@@ -509,7 +515,7 @@ elif mode == "🔄 オーナーチェンジ案件":
     if selected_label != "未選択（物件を選んでください）":
       target_row = prop_map[selected_label]
       row_id = target_row["_rowId"]
-      p_name = str(target_row.get("物件名", target_row.get("物件名称", ""))).strip()
+      p_name = get_safe_property_name(target_row)
 
       with col_s2:
         st.markdown(f"**選択中**: {p_name} (行番号: {row_id})")
